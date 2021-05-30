@@ -10,9 +10,12 @@ from torch.utils.data._typing import _DataPipeMeta
 from typing import TypeVar, Generic, Iterable, Iterator, Sequence, List, Optional, Tuple, Dict, Callable
 from ... import Tensor, Generator
 
+# from torch.utils.data.datapipes.iter.dataframes import DFIterDataPipe as DFIterDataPipe
+
+
+
 T_co = TypeVar('T_co', covariant=True)
 T = TypeVar('T')
-
 
 class Dataset(Generic[T_co]):
     r"""An abstract class representing a :class:`Dataset`.
@@ -167,12 +170,32 @@ class IterableDataset(Dataset[T_co], metaclass=_DataPipeMeta):
         IterableDataset.functions[function_name] = function
 
     @classmethod
-    def register_datapipe_as_function(cls, function_name, cls_to_register):
+    def register_datapipe_as_function(cls, function_name, cls_to_register, is_df = False):
+        # print('register function', function_name)
         if function_name in IterableDataset.functions:
             raise Exception("Unable to add DataPipe function name {} as it is already taken".format(function_name))
 
         def class_function(cls, source_dp, *args, **kwargs):
-            return cls(source_dp, *args, **kwargs)
+            # this hack here instead of typing
+
+
+            # print('runtime call of ', function_name)
+            result_pipe = cls(source_dp, *args, **kwargs)
+            if is_df or isinstance(source_dp, DFIterDataPipe) or getattr(result_pipe, '_dp_cast_to_df', False):
+                if function_name != 'trace_as_dataframe' and function_name != 'batch' and function_name != 'groupby':
+                    result_pipe = result_pipe.trace_as_dataframe()
+            # else:
+                # print(function_name, 'will not return DF')
+            if getattr(result_pipe, '_dp_nesting_depth', None) is None: 
+                # print('setting dp_depth', type(source_dp), type(result_pipe))
+                # depth = getattr(source_dp, '_dp_nesting_depth', None)
+
+                result_pipe._dp_nesting_depth = getattr(source_dp, '_dp_nesting_depth', None)
+            if getattr(result_pipe, '_dp_contains_dataframe', None) is None: 
+                # print('setting _dp_contains_dataframe', type(source_dp), type(result_pipe))
+                # depth = getattr(source_dp, '_dp_nesting_depth', None)
+                result_pipe._dp_contains_dataframe = getattr(source_dp, '_dp_contains_dataframe', None)
+            return result_pipe
         function = functools.partial(class_function, cls_to_register)
         IterableDataset.functions[function_name] = function
 
@@ -190,6 +213,8 @@ class IterableDataset(Dataset[T_co], metaclass=_DataPipeMeta):
             raise Exception("Attempt to override existing reduce_ex_hook")
         IterableDataset.reduce_ex_hook = hook_fn
 
+class DFIterDataPipe(IterableDataset):
+    pass
 
 class TensorDataset(Dataset[Tuple[Tensor, ...]]):
     r"""Dataset wrapping tensors.
