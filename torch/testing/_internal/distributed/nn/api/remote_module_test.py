@@ -36,13 +36,15 @@ def remote_module_attributes(remote_module):
 def remote_forward(remote_module, args):
     return remote_module.forward(*args)
 
-
 # RPC handler for running forward_async on the destination worker.
 def remote_forward_async(remote_module, args):
     # Since future cannot be pickled and sent over the RPC layer,
     # have to wait and behave just like ``forward_sync``.
     return remote_module.forward_async(*args).wait()
 
+# RPC handler for getting training mode on the destination worker.
+def get_remote_training_arg(module_rref):
+    return module_rref.local_value().training
 
 class ModuleCreationMode(enum.Enum):
     MODULE_CTOR_WITH_INTERFACE = "module_ctor_with_interface"
@@ -145,6 +147,7 @@ class RemoteModuleTest(CommonRemoteModuleTest):
             r"Expect `module_cls\(\*args, \*\*kwargs\)` returns an instance of <class nn.Module>,",
         ):
             RemoteModule(remote_device, BadModule, args, kwargs).forward()
+
 
     @dist_utils.dist_init
     def test_forward_async(self):
@@ -256,6 +259,32 @@ class RemoteModuleTest(CommonRemoteModuleTest):
             self.assertEqual(rref, remote_module.module_rref)
             for param in rref.to_here().parameters():
                 self.assertTrue(torch.equal(param, _PARAM_VAL))
+
+    @dist_utils.dist_init
+    def test_train(self):
+        if self.rank != 0:
+            return
+        dst_worker_name = dist_utils.worker_name((self.rank + 1) % self.world_size)
+
+        for remote_module in self._create_remote_module_iter(
+            dst_worker_name, modes=[ModuleCreationMode.MODULE_CTOR]
+        ):
+            remote_module.train()
+            ret = rpc.rpc_sync(dst_worker_name, get_remote_training_arg, args=(remote_module.get_module_rref(),))
+            self.assertEqual(ret, True)
+
+    @dist_utils.dist_init
+    def test_eval(self):
+        if self.rank != 0:
+            return
+        dst_worker_name = dist_utils.worker_name((self.rank + 1) % self.world_size)
+
+        for remote_module in self._create_remote_module_iter(
+            dst_worker_name, modes=[ModuleCreationMode.MODULE_CTOR]
+        ):
+            remote_module.eval()
+            ret = rpc.rpc_sync(dst_worker_name, get_remote_training_arg, args=(remote_module.get_module_rref(),))
+            self.assertEqual(ret, False)
 
     @dist_utils.dist_init
     def test_unsupported_methods(self):
@@ -380,14 +409,6 @@ class RemoteModuleTest(CommonRemoteModuleTest):
             ):
                 remote_module.named_modules()
 
-            with self.assertRaisesRegex(
-                ValueError, r"Method ``train`` not supported for RemoteModule"
-            ):
-                remote_module.train()
-            with self.assertRaisesRegex(
-                ValueError, r"Method ``eval`` not supported for RemoteModule"
-            ):
-                remote_module.eval()
             with self.assertRaisesRegex(
                 ValueError, r"Method ``requires_grad_`` not supported for RemoteModule"
             ):
